@@ -58,6 +58,7 @@ By default, when a temporary table is not needed it is truncated to zero pages. 
 truncation so that when the table is reused there are pre allocated extents available for use.
 
 http://www.ibm.com/developerworks/cn/data/library/techarticle/dm-1208hanrb/index.html
+
 在系统中设置 DB2_SMS_TRUNC_TMPTABLE_THRESH 注册变量。默认情况下，当系统临时表空间中的对象被删除时，先前为其分配的所有文件都会被回收。当下次需要分配新空间时，会重新进行分配。不断重复的分配 / 释放也会带来很多性能方面的开销。我们可以通过设置这个注册变量，来保证临时表空间中已经分配的空间不会在对应的对象被删除时完全回收。这样可以保留一部分可用空间（保留的大小由该变量的值决定）供我们下次使用，因此减少了重新分配这些空间带来的种种开销。 
 
 10 extents should be preserved when truncating any temp table
@@ -81,61 +82,61 @@ db2inst1@cocbase:~/sqllib> db2 connect to intro
  Local database alias   = INTRO
 
 db2inst1@cocbase:~/sqllib> db2 list tablespaces show detail
-
-           Tablespaces for Current Database
-
- Tablespace ID                        = 0
- Name                                 = SYSCATSPACE
- Type                                 = Database managed space
- Contents                             = All permanent data. Regular table space.
- State                                = 0x0000
-   Detailed explanation:
-     Normal
- Total pages                          = 32768
- Useable pages                        = 32760
- Used pages                           = 25088
- Free pages                           = 7672
- High water mark (pages)              = 25088
- Page size (bytes)                    = 4096
- Extent size (pages)                  = 4
- Prefetch size (pages)                = 8
- Number of containers                 = 2
-
- Tablespace ID                        = 1
- Name                                 = TEMPSPACE1
- Type                                 = System managed space
- Contents                             = System Temporary data
- State                                = 0x0000
-   Detailed explanation:
-     Normal
- Total pages                          = 2
- Useable pages                        = 2
- Used pages                           = 2
- Free pages                           = Not applicable
- High water mark (pages)              = Not applicable
- Page size (bytes)                    = 4096
- Extent size (pages)                  = 32
- Prefetch size (pages)                = 64
- Number of containers                 = 2
-
- Tablespace ID                        = 2
- Name                                 = USERSPACE1
- Type                                 = Database managed space
- Contents                             = All permanent data. Large table space.
- State                                = 0x0000
-   Detailed explanation:
-     Normal
- Total pages                          = 8192
- Useable pages                        = 8128
- Used pages                           = 96
- Free pages                           = 8032
- High water mark (pages)              = 96
- Page size (bytes)                    = 4096
- Extent size (pages)                  = 32
- Prefetch size (pages)                = 64
- Number of containers                 = 2
-
-db2inst1@cocbase:~/sqllib> 
+        
+                   Tablespaces for Current Database
+        
+         Tablespace ID                        = 0
+         Name                                 = SYSCATSPACE
+         Type                                 = Database managed space
+         Contents                             = All permanent data. Regular table space.
+         State                                = 0x0000
+           Detailed explanation:
+             Normal
+         Total pages                          = 32768
+         Useable pages                        = 32760
+         Used pages                           = 25088
+         Free pages                           = 7672
+         High water mark (pages)              = 25088
+         Page size (bytes)                    = 4096
+         Extent size (pages)                  = 4
+         Prefetch size (pages)                = 8
+         Number of containers                 = 2
+        
+         Tablespace ID                        = 1
+         Name                                 = TEMPSPACE1
+         Type                                 = System managed space
+         Contents                             = System Temporary data
+         State                                = 0x0000
+           Detailed explanation:
+             Normal
+         Total pages                          = 2
+         Useable pages                        = 2
+         Used pages                           = 2
+         Free pages                           = Not applicable
+         High water mark (pages)              = Not applicable
+         Page size (bytes)                    = 4096
+         Extent size (pages)                  = 32
+         Prefetch size (pages)                = 64
+         Number of containers                 = 2
+        
+         Tablespace ID                        = 2
+         Name                                 = USERSPACE1
+         Type                                 = Database managed space
+         Contents                             = All permanent data. Large table space.
+         State                                = 0x0000
+           Detailed explanation:
+             Normal
+         Total pages                          = 8192
+         Useable pages                        = 8128
+         Used pages                           = 96
+         Free pages                           = 8032
+         High water mark (pages)              = 96
+         Page size (bytes)                    = 4096
+         Extent size (pages)                  = 32
+         Prefetch size (pages)                = 64
+         Number of containers                 = 2
+        
+        db2inst1@cocbase:~/sqllib> 
 
 • SYSCATSPACE (catalog data)
 • TEMPSPACE1 (system temp)
@@ -201,8 +202,74 @@ TEMPBP                    TEMPSPACE1
 
 4 record(s) selected.
 
+#### Create dedicated tablespace for LOB/LONG data
 
+If the database is going to contain significant amount of LOB/LONG data, it is a good idea to create dedicated tablespace(s) for LOB data. There are two design reasons for it. First, LOB data can be quite large so it can quickly max out the capacity of your regular data tablespaces. Secondly, LOB data is not buffered in DB2 bufferpools, therefore you want to ensure that it is being buffered in the file system cache. Since regular data is buffered in buffer pools there is no need for double buffering it in file system cache. However, for LOB data file system caching is critical.
+
+    db2 create LARGE tablespace tbsplong managed by automatic storage FILE SYSTEM CACHING 
     
+### 06.Configuration Advisor
+
+
+When a database is created in DB2, the Configuration Advisor is run under the covers automatically using default
+values. This behavior can be disabled with the db2set command before creating a database:
+
+    db2set DB2_ENABLE_AUTOCONFIG_DEFAULT=NO
+
+use the AUTCONFIGURE command to provide database usage characteristics and get recommended values
+to improve the initial configuration of the database with respect to the input. Here we are only retrieving
+recommendations (apply none) but you can also optionally apply recommendations as well (apply db only,
+apply db and dbm).
+
+    db2 autoconfigure using mem_percent 50 tpm 200 admin_priority performance is_populated no num_remote_apps 200 isolation cs apply none
+    
+    
+### 07.Collecting Baseline Information
+
+#### System Level
+
+    db2pd -osinfo disk /data1
+    
+or
+
+    db2 connect to INTRO
+    db2 "select substr(name,1,20) as name, substr(value,1,20) as value from sysibmadm.env_sys_resources"
+
+#### Database Level
+
+    cd /home/db2inst1/
+    mkdir envdata
+    cd ~/envdata
+    db2support . -d INTRO -c
+    unzip db2support.zip
+    
+So far we have looked at tools to check the configuration information. There are times when you need to dump the database
+schema containing DDL for all the tables, indexes, triggers, stored procedures and functions that were created by the user. This can be done with the db2look command. This command offers a host of options to tailor the results to your needs. With
+respect to performance related information the following parameters can be used:
+• -l : bufferpools and tablespaces, created
+• -f : database parameters that impact the query optimizer
+• -x or -xd : authorizations specified with the RESTRICTIVE parameter of the CREATE DATABASE command
+• -m ; statistics.
+
+    db2look -d INTRO –f –o queryParameters.out
+    db2look –d INTRO –l –o BPSandTBS.out
+    
+
+
+
+### Cleanup
+
+    db2 force applications all
+    db2 terminate
+    db2 drop db intro
+    db2set DB2_SMS_TRUNC_TMPTABLE_THRESH=
+    db2set DB2_MEM_TUNING_RANGE=
+    db2set DB2MEMDISCLAIM=NO
+    db2stop
+
+
+
+
 
 
 
