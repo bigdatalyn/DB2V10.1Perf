@@ -1,4 +1,4 @@
-01.Create customized database
+### 01.Create customized database
 
   db2 "create database INTRO ON /data1, /data2 DBPATH ON /home/db2inst1 RESTRICTIVE"
 
