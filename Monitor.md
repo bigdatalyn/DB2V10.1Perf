@@ -207,7 +207,7 @@ how many agents are “Executing” or in a “Lockwait” status.
     db2pd -db db2pt -edus | more
     db2pd -edus |more
 
-Display connections that return the highest volume of data to clients, ordered by rows returned.
+显示每个连接返回的行数
 
     db2 connect to db2pt
     db2 "SELECT application_handle, rows_returned, tcpip_send_volume,
@@ -215,7 +215,7 @@ Display connections that return the highest volume of data to clients, ordered b
     FROM TABLE(MON_GET_CONNECTION(cast(NULL as bigint), -2)) AS t
     ORDER BY rows_returned DESC"
 
-List utilization of container file systems, ordered by highest utilization
+显示每个container的使用率
 
     db2 "SELECT varchar(container_name, 65) as container_name, SUBSTR(fs_id,1,10)
     fs_id, fs_used_size, fs_total_size, CASE WHEN fs_total_size > 0
@@ -223,7 +223,7 @@ List utilization of container file systems, ordered by highest utilization
     ELSE DEC(-1,5,2) END as utilization
     FROM TABLE(MON_GET_CONTAINER('',-1)) AS t ORDER BY utilization DESC"
 
-lists the activity on all tables accessed since the database was activated, aggregated across all database members, ordered by highest number of reads.
+从数据库激活来之后，读取表中数据多少行的统计（从高到低total_rows_read）
 
     db2 "SELECT varchar(tabschema,20) as tabschema, varchar(tabname,20) as
     tabname, sum(rows_read) as total_rows_read, sum(rows_inserted) as
@@ -233,8 +233,7 @@ lists the activity on all tables accessed since the database was activated, aggr
     GROUP BY tabschema, tabname
     ORDER BY total_rows_read DESC"
 
-list a point-in-time view of both static and dynamic SQL statements in the database package cache.
-List all the dynamic SQL statements from the database package cache ordered by the average CPU time.
+从数据库字典package缓存中获取SQL，耗费平均CPU时间的排序
 
     db2 "SELECT MEMBER, SECTION_TYPE, TOTAL_CPU_TIME/NUM_EXEC_WITH_METRICS as
     AVG_CPU_TIME, EXECUTABLE_ID FROM TABLE(SYSPROC.MON_GET_PKG_CACHE_STMT('D',
@@ -247,38 +246,149 @@ List all the dynamic SQL statements from the database package cache ordered by t
 
 #### I/O Wait
 
-use vmstat to detect the disk bottleneck by looking at the CPU wait time. Generally, if you see wait times here in excess of 25% you have an opportunity to improve overall throughput by reducing the overall I/O burden on the containers being taxed.
+通过vmstat的CPU wait time来观察disk瓶颈，一般wait times超过25%以上可以有机会减少I/O的整体负荷 来提高整体吞吐量
 
-collect information like how many physical reads are occurring on the tablespace and how much read time is accumulating against the underlying container. 
+收集每个表空间的的physical reads来统计container的负荷
 
-Range partitioning is only one technique you can use to spread your data out across disk resources. 
+可以用Range partitioning范围分区来扩展disk的并行度
 
-Start the vmstat tool with a 2 second interval.
+没2秒收集一次vmstat
 
     vmstat 2
 
-Take note of the cpu/wa column, this represents %cpu time in wait
+关注cpu/wa 列, 表示 %cpu time 在等待
 
-Start the “iostat tool” with a 2 second interval
+没2秒收集iostat
 
     iostat 2
 
-%CPU Waiting iowaiting
+关注：%CPU Waiting iowaiting
 
-take a snapshot of the tablespaces. Note how many physical reads are being done against the TS_RANGE1 tablespace. Then run the
-script that will get the read times on a per container basis.
+表空间快照获取 Bufferpool data physical reads的信息：
 
     db2 get snapshot for tablespaces on db2pt | more
-    
-Excessive I/O activity results from many different database operations; table and index scans, mismanaged or lack of memory to relieve I/O sort overflows, batch activity, excessive logging, temporary tables, lack of sufficient resources, and poor database designs, are some typical causes.
+
+每个container的（MON_GET_CONTAINER)h获取pool read  time的排序（从高到底）
 
 
+Note: Since actual disk resources for both containers are the same, you will not see a big difference in CPU Wait time (maybe a little bit, attributed to multiple prefetchers working). The emphasis here is that you will see that the I/O is indeed being spread between the containers with a snapshot of the tablespaces and the MON_GET_CONTAINERS table function.
+
+通过修改为范围分区表前后的数据
+
+### 07.数据库IO的监控
+
+I/O活动主要来自于：
+
+表和索引的扫描
+排序溢出
+batch执行
+大量使用临时表空间
+不够系统资源（系统瓶颈）
+数据库设计不合理等其他原因
+
+怎样收集潜在或者当前：IO的热点
+
+关注项目：
+Rows_Read ： 为了返回request读取了多少行（评估是否需要增加额外的索引）
+
+Rows_Returned ：返回给应用的行数，跟rows_read可以评估读的有效因子，也可以用来评估网络流量（在层次架构中）
+
+Overflow_Accesses ：读写表时候，有多少的溢出行，表示有数据碎片，可以通过 reorg来重组表，一般发生在更新表中有varchar列的数据或者是alter table修改表结构导致的
+
+Rows_Written :在表中的 I U D的行数，如果太高值的话需要runstat收集最新统计信息
+
+Direct_Reads ：没用使用buffer的读次数，如：LOBS，LONG VARCHARS， Backups等，，可以使打开filesytem cachingk开关来减少直接读的开销
+
+Direct_Read_Time ：没事用buffer直接读所消耗的时间，单位：miliseconds
+
+Direct_Read_Requests ：直接读一个或多个sector数据的的次数
+
+Pool_Data_P_Reads ：从磁盘container中读取多少data page到bufferpool
+
+Pool_Index_P_Reads :从磁盘container中读取多少index page到bufferpool
+
+Pool_Temp_Data_P_Reads ： 临时表空间
+
+Pool_Temp_Index_P_Reads ：临时表空间
+
+获取IO想关的信息
+
+    db2 get snapshot for database on db2pt | egrep -i 'read|rows|timestamp' | more
+
+从第一次数据连接或者reset timestamp以来计数的信息
+可以快速的评估数据库的读写活动，逻辑和物理读，直接读写
+
+#### 读的有效性
+
+每个事务的读：Reads per Transaction
+
+you see a result of 110 reads/trx, a fairly good rate for an OLTP system. Under 10 would be very good, over 50 worth investigating.
+
+每个app读取了多少行返回了多少行 ：the rows read for every row returned to the applications.
+
+每个container读取的时间（那个container在高负荷中）
+
+#### 检索数据库状态
+
+通过下面语句获得：
+
+    db2 "SELECT SUBSTR(DB_NAME, 1, 20) AS DB_NAME, DB_STATUS, SERVER_PLATFORM,
+    DB_LOCATION, DB_CONN_TIME, DBPARTITIONNUM FROM SYSIBMADM.SNAPDB ORDER BY
+    DBPARTITIONNUM"
+
+或者：
+
+    db2 "SELECT SUBSTR(DB_NAME, 1, 20) AS DB_NAME, DB_STATUS, SERVER_PLATFORM,
+    DB_LOCATION, DB_CONN_TIME FROM TABLE(SNAP_GET_DB(CAST (NULL AS VARCHAR(128)),
+    -2)) AS T"
 
 
+### 08.Bufferpool的监控
+
+通过收集查看buffer的命中率来评估
+
+    db2 alter bufferpool bpmontune size 5000
+    db2 -tvf get_bphits_all.db2
+
+修改查看命中率
+
+或者改为automatic
+
+    db2 alter bufferpool bpmontune size automatic
+
+### 09.db2top
+
+db2top -d XXXX
+
+操作：
+
+O is used to look at current settings for db2top, 
+k is used to toggle between actual and delta values and 
+C enables the capturing of the session into a file that can be replayed and thus reanalyzed.
+
+Tables (T), Bufferpools (b), and finally Dynamic SQL (D).
 
 
+• Use the Enter Key to exit Help.
+• T to display the most active tables, you should see the Delta view which is representative of the activity
+   during a tuning interval.
+• k to toggle to Actual view where cumulative results are seen.
 
+active tables and what kind of I/O is occurring.
 
+• R to reset the snapshot counters then y, enter to confirm
+The Actual counters will be reset to zero.
+
+• b to see Bufferpool activity including Bufferpool Hit Ratio.
+
+• D to see recent dynamic SQL activity against the database.
+• f to freeze the screen.
+• Pick out a query to “tune”. Use your mouse to highlight the SQL_Statement Hash Value and copy the
+       value on to the clipboard.
+
+收集到的sql可以就行基准测试：
+
+    db2batch –d db2pt –f mySQL.out ( to invoke db2batch get benchmark results).
 
 
 
